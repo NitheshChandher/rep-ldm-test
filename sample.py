@@ -8,8 +8,46 @@ from PIL import Image
 from torch.utils.data import DataLoader
 from torch import autocast
 from diffusers import DDPMScheduler, DDIMScheduler, AutoencoderKL
-from dataset.dataloader import load_and_prepare_dataset
 from dataset.custom import ImageDataset
+
+import os
+import torch
+import numpy as np
+from torch.utils.data import Dataset
+
+
+class RepresentationDataset(Dataset):
+    def __init__(self, rep_dir, file_ext="npy"):
+        self.rep_dir = rep_dir
+        self.file_ext = file_ext
+
+        self.files = sorted([
+            f for f in os.listdir(rep_dir)
+            if f.endswith(file_ext)
+        ])
+
+        if len(self.files) == 0:
+            raise ValueError(f"No *.{file_ext} files found in {rep_dir}")
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        path = os.path.join(self.rep_dir, self.files[idx])
+
+        if self.file_ext == "pt":
+            rep = torch.load(path, map_location="cpu")
+
+        elif self.file_ext == "npy":
+            rep = torch.from_numpy(np.load(path))
+
+        else:
+            raise ValueError("Unsupported format (use 'pt' or 'npy')")
+
+        # Ensure float32
+        rep = rep.float()
+
+        return rep
 
 def seed_everything(seed):
     torch.manual_seed(seed)
@@ -37,13 +75,7 @@ def sample(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.float32
 
-    save_path = os.path.join(
-        args.save_path,
-        args.model,
-        args.dataset,
-        args.method,
-        str(args.num_inference_steps),
-    )
+    save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
 
     print(f"Saving to: {save_path}")
@@ -68,19 +100,13 @@ def sample(args):
         )
         vae.to(device)
         vae.requires_grad_(False)
-    
-    _, dataloader = load_and_prepare_dataset(
-        dataset_name=args.dataset,
-        batch_size=args.bs,
-        img_size=(args.height, args.width),
-        data_dir=None,
-        rep_dir=args.rep_dir,
-    )
+
+    dataset = RepresentationDataset(args.rep_dir)
+    dataloader = DataLoader(dataset, batch_size=args.bs, shuffle=False)
 
     total_steps = len(dataloader)
 
     for step, batch in enumerate(dataloader):
-
         if args.VAE is True:
             latents = torch.randn(
                 (args.bs, 4, args.height // 8, args.width // 8),
@@ -119,6 +145,7 @@ def sample(args):
         torch.cuda.empty_cache()
 
         print(f"Saved batch {step+1}/{total_steps}")
+        break
 
 
 def parse_args():
@@ -131,8 +158,8 @@ def parse_args():
     parser.add_argument("--scheduler", type=str, default="ddpm")
     parser.add_argument("--num_inference_steps", type=int, default=100)
     parser.add_argument("--pretrained_model_name_or_path", type=str, default="CompVis/stable-diffusion-v1-4")
-    parser.add_argument("--height", type=int, default=256)
-    parser.add_argument("--width", type=int, default=256)
+    parser.add_argument("--height", type=int, default=32)
+    parser.add_argument("--width", type=int, default=32)
     parser.add_argument("--bs", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
 
